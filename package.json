@@ -36,7 +36,7 @@
   },
   "license": "Apache-2.0",
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.0.4",
+    "@modelcontextprotocol/sdk": "1.17.0",
     "@slack/web-api": "^7.9.1",
     "@types/node": "^20.10.3",
     "dotenv": "^16.4.7",
