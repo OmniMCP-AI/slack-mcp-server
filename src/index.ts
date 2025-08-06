@@ -5,6 +5,10 @@ import {
   CallToolRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import { StreamableHTTPServerTransport, StreamableHTTPServerTransportOptions } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import http from 'http';
+import axios from 'axios';
+
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { zodToJsonSchema } from 'zod-to-json-schema';
 import { WebClient } from '@slack/web-api';
@@ -36,7 +40,6 @@ dotenv.config();
 //   process.exit(1);
 // }
 
-const slackClient = new WebClient(process.env.SLACK_ACCESS_TOKEN);
 // const userClient = new WebClient(process.env.SLACK_USER_TOKEN);
 
 const server = new Server(
@@ -50,6 +53,41 @@ const server = new Server(
     },
   }
 );
+
+/**
+ * Refreshes the Slack access token using a refresh token
+ * @param refresh_token The refresh token to use for refreshing the access token
+ * @returns An object containing the new access token and other OAuth information
+ */
+async function refreshAccessToken(clientId: string, clientSecret: string, refresh_token: string) {
+  try {
+
+    const response = await axios.post('https://slack.com/api/oauth.v2.access', null, {
+      params: {
+        client_id: clientId,
+        client_secret: clientSecret,
+        grant_type: 'refresh_token',
+        refresh_token: refresh_token
+      },
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded'
+      }
+    });
+
+    if (!response.data.ok) {
+      throw new Error(`Failed to refresh token: ${response.data.error}`);
+    }
+
+    return {
+      access_token: response.data.access_token,
+      refresh_token: response.data.refresh_token || refresh_token, // Use new refresh token if provided, otherwise keep the old one
+      expires_in: response.data.expires_in
+    };
+  } catch (error) {
+    console.error('Error refreshing access token:', error);
+    throw new Error('Failed to refresh access token');
+  }
+}
 
 server.setRequestHandler(ListToolsRequestSchema, async () => {
   return {
@@ -104,11 +142,40 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
   };
 });
 
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
+server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
   try {
     if (!request.params) {
       throw new Error('Params are required');
     }
+    const headers = extra?.requestInfo?.headers;
+
+
+    const clientId: any = headers?.slack_client_id;
+    const clientSecret: any = headers?.slack_client_secret;
+    const refresh_token: any = headers?.slack_refresh_token;
+    let access_token: any = headers?.slack_access_token;
+
+    if(!refresh_token){
+      throw new Error("Refresh token is required");
+    }
+
+
+    if (!clientId || !clientSecret) {
+      throw new Error('SLACK_CLIENT_ID and SLACK_CLIENT_SECRET missing');
+    }
+
+    // If no access token is provided or if we need a fresh one, refresh it
+    try {
+      const tokenData = await refreshAccessToken(clientId, clientSecret,refresh_token);
+      access_token = tokenData.access_token;
+    } catch (tokenError) {
+      console.error('Failed to refresh access token:', tokenError);
+      throw new Error('Failed to authenticate with Slack');
+    }
+
+    // Initialize Slack client with the access token
+    const slackClient = new WebClient(access_token);
+    
     switch (request.params.name) {
       case 'slack_list_channels': {
         const args = ListChannelsRequestSchema.parse(request.params.arguments);
@@ -255,9 +322,55 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 });
 
 async function runServer() {
-  const transport = new StdioServerTransport();
+  const port = parseInt(process.env.PORT || '3333');
+  const options: StreamableHTTPServerTransportOptions = {
+    sessionIdGenerator: undefined
+  }
+  const transport = new StreamableHTTPServerTransport(options);
   await server.connect(transport);
-  console.error('Slack MCP Server running on stdio');
+
+  // Create HTTP server to handle requests
+  const httpServer = http.createServer((req, res) => {
+    if (req.method === 'POST' && req.url === '/mcp') {
+      let body = '';
+      req.on('data', chunk => {
+        body += chunk.toString();
+      });
+      req.on('end', async () => {
+        try {
+          res.setHeader('Content-Type', 'application/json');
+          res.setHeader('Access-Control-Allow-Origin', '*');
+          res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+          res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+          if (req.method === 'OPTIONS') {
+            res.writeHead(200);
+            res.end();
+            return;
+          }
+
+          await transport.handleRequest(req, res, JSON.parse(body));
+        } catch (error) {
+          console.error('HTTP request error:', error);
+          res.writeHead(500);
+          res.end(JSON.stringify({ error: 'Internal server error' }));
+        }
+      });
+    } else if (req.method === 'OPTIONS') {
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+      res.writeHead(200);
+      res.end();
+    } else {
+      res.writeHead(400);
+      res.end('Not Found');
+    }
+  });
+
+  httpServer.listen(port, () => {
+    console.error(`Slack MCP server running on HTTP port ${port}`);
+  });
 }
 
 runServer().catch((error) => {
