@@ -68,15 +68,13 @@ const server = new Server(
 
 async function update_config_prod(userId: string, serverId: string, refreshToken: string, updateConfigUrl: string){
   try {
-    const response = await axios.post(updateConfigUrl, null, {
-      params: {
-        user_id: userId,
-        mcp_serverId: serverId,
-        config:{
-          'SLACK_REFRESH_TOKEN': refreshToken,
-        },
-        scope: 'private',
-      }
+    const response = await axios.post(updateConfigUrl, {
+      user_id: userId,
+      mcp_serverId: serverId,
+      config:{
+        'SLACK_REFRESH_TOKEN': refreshToken,
+      },
+      scope: 'private',
     });
     console.error(response?.data);
   } catch (error) {
