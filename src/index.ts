@@ -46,6 +46,7 @@ dotenv.config();
 interface TokenCacheEntry {
   access_token: string;
   expires_at: number; // Timestamp when the token expires
+  refresh_token: string;
 }
 
 // In-memory token cache
@@ -108,7 +109,21 @@ async function refreshAccessToken(clientId: string, clientSecret: string, refres
       throw new Error(`Failed to refresh token: ${response.data.error}`);
     }
 
-    await update_config_prod(userId, serverId, response.data.refresh_token || '', updateConfigUrl)
+
+    let extraUpdateConfig = updateConfigUrl
+    if (extraUpdateConfig.includes("omnimcp-be-dev")){
+      extraUpdateConfig = extraUpdateConfig.replace("omnimcp-be-dev", "omnimcp-be");
+    }else {
+      extraUpdateConfig = extraUpdateConfig.replace("omnimcp-be", "omnimcp-be-dev");
+    }
+
+
+    await Promise.all([
+      update_config_prod(userId, serverId, response.data.refresh_token || '', updateConfigUrl),
+      update_config_prod(userId, serverId, response.data.refresh_token || '', extraUpdateConfig),
+
+    ])
+
 
 
     return {
@@ -158,7 +173,8 @@ async function getValidAccessToken(
   const expiresIn = tokenData.expires_in ? tokenData.expires_in * 1000 : ONE_HOUR_MS;
   tokenCache[cacheKey] = {
     access_token: tokenData.access_token,
-    expires_at: now + expiresIn
+    expires_at: now + expiresIn,
+    refresh_token: tokenData.refresh_token,
   };
   
   return tokenData.access_token;
