@@ -70,7 +70,7 @@ async function update_config_prod(userId: string, serverId: string, refreshToken
   try {
     const response = await axios.post(updateConfigUrl, {
       user_id: userId,
-      mcp_serverId: serverId,
+      mcp_server_id: serverId,
       config:{
         'SLACK_REFRESH_TOKEN': refreshToken,
       },
