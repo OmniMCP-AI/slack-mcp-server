@@ -42,6 +42,18 @@ dotenv.config();
 
 // const userClient = new WebClient(process.env.SLACK_USER_TOKEN);
 
+// Token cache structure
+interface TokenCacheEntry {
+  access_token: string;
+  expires_at: number; // Timestamp when the token expires
+}
+
+// In-memory token cache
+const tokenCache: Record<string, TokenCacheEntry> = {};
+
+// One hour in milliseconds
+const ONE_HOUR_MS = 60 * 60 * 1000;
+
 const server = new Server(
   {
     name: 'slack-mcp-server',
@@ -54,14 +66,34 @@ const server = new Server(
   }
 );
 
+async function update_config_prod(userId: string, serverId: string, refreshToken: string, updateConfigUrl: string){
+  try {
+    const response = await axios.post(updateConfigUrl, null, {
+      params: {
+        user_id: userId,
+        mcp_serverId: serverId,
+        config:{
+          'SLACK_REFRESH_TOKEN': refreshToken,
+        },
+        scope: 'private',
+      }
+    });
+    console.error(response?.data);
+  } catch (error) {
+    console.error('Error update user config:', error);
+    throw new Error('Error update user config');
+  }
+}
+
 /**
  * Refreshes the Slack access token using a refresh token
+ * @param clientId The Slack client ID
+ * @param clientSecret The Slack client secret
  * @param refresh_token The refresh token to use for refreshing the access token
  * @returns An object containing the new access token and other OAuth information
  */
-async function refreshAccessToken(clientId: string, clientSecret: string, refresh_token: string) {
+async function refreshAccessToken(clientId: string, clientSecret: string, refresh_token: string, userId: string, serverId: string, updateConfigUrl: string) {
   try {
-
     const response = await axios.post('https://slack.com/api/oauth.v2.access', null, {
       params: {
         client_id: clientId,
@@ -78,6 +110,9 @@ async function refreshAccessToken(clientId: string, clientSecret: string, refres
       throw new Error(`Failed to refresh token: ${response.data.error}`);
     }
 
+    await update_config_prod(userId, serverId, response.data.refresh_token || '', updateConfigUrl)
+
+
     return {
       access_token: response.data.access_token,
       refresh_token: response.data.refresh_token || refresh_token, // Use new refresh token if provided, otherwise keep the old one
@@ -87,6 +122,48 @@ async function refreshAccessToken(clientId: string, clientSecret: string, refres
     console.error('Error refreshing access token:', error);
     throw new Error('Failed to refresh access token');
   }
+}
+
+/**
+ * Gets a valid access token, either from cache or by refreshing
+ * @param userId The user ID for cache key
+ * @param serverId The server ID for cache key
+ * @param clientId The Slack client ID
+ * @param clientSecret The Slack client secret
+ * @param refresh_token The refresh token
+ * @param updateConfigUrl Url of update config
+ * @returns A valid access token
+ */
+async function getValidAccessToken(
+  userId: string,
+  serverId: string,
+  clientId: string,
+  clientSecret: string,
+  refresh_token: string,
+  updateConfigUrl: string
+): Promise<string> {
+  const cacheKey = `${userId}:${serverId}`;
+  const now = Date.now();
+  const cachedToken = tokenCache[cacheKey];
+
+  // If we have a cached token that's not expired, use it
+  if (cachedToken && cachedToken.expires_at > now) {
+    console.log(`Using cached token for ${cacheKey}, expires in ${Math.round((cachedToken.expires_at - now) / 1000)} seconds`);
+    return cachedToken.access_token;
+  }
+
+  // Otherwise, we need to refresh the token and wait for it
+  console.log(`Refreshing token for ${cacheKey}`);
+  const tokenData = await refreshAccessToken(clientId, clientSecret, refresh_token, userId, serverId, updateConfigUrl);
+  
+  // Cache the new token with expiration (1 hour or less if specified by Slack)
+  const expiresIn = tokenData.expires_in ? tokenData.expires_in * 1000 : ONE_HOUR_MS;
+  tokenCache[cacheKey] = {
+    access_token: tokenData.access_token,
+    expires_at: now + expiresIn
+  };
+  
+  return tokenData.access_token;
 }
 
 server.setRequestHandler(ListToolsRequestSchema, async () => {
@@ -149,27 +226,43 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     }
     const headers = extra?.requestInfo?.headers;
 
-
     const clientId: any = headers?.slack_client_id;
     const clientSecret: any = headers?.slack_client_secret;
     const refresh_token: any = headers?.slack_refresh_token;
+    const userId: any = headers?.user_id;
+    const serverId: any = headers?.server_id;
+    const updateConfigUrl: any = headers?.update_config_url;
     let access_token: any = headers?.slack_access_token;
+
+
+    if(!userId || !serverId){
+      throw new Error('User id or server id is missing');
+    }
 
     if(!refresh_token){
       throw new Error("Refresh token is required");
     }
 
-
     if (!clientId || !clientSecret) {
       throw new Error('SLACK_CLIENT_ID and SLACK_CLIENT_SECRET missing');
     }
 
-    // If no access token is provided or if we need a fresh one, refresh it
+    if (!updateConfigUrl) {
+      throw new Error('Update config URL is required');
+    }
+
+    // Get a valid access token (from cache or refresh if needed)
     try {
-      const tokenData = await refreshAccessToken(clientId, clientSecret,refresh_token);
-      access_token = tokenData.access_token;
+      access_token = await getValidAccessToken(
+        userId,
+        serverId,
+        clientId,
+        clientSecret,
+        refresh_token,
+        updateConfigUrl
+      );
     } catch (tokenError) {
-      console.error('Failed to refresh access token:', tokenError);
+      console.error('Failed to get valid access token:', tokenError);
       throw new Error('Failed to authenticate with Slack');
     }
 
