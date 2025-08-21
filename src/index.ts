@@ -109,6 +109,9 @@ async function refreshAccessToken(clientId: string, clientSecret: string, refres
       throw new Error(`Failed to refresh token: ${response.data.error}`);
     }
 
+    const dev_url = process.env.DEV_OMNIMCP_BE_URL || '';
+    const prod_url = process.env.PROD_OMNIMCP_BE_URL || '';
+
 
     let extraUpdateConfig = updateConfigUrl
     if (extraUpdateConfig.includes("omnimcp-be-dev")){
@@ -119,8 +122,8 @@ async function refreshAccessToken(clientId: string, clientSecret: string, refres
 
 
     await Promise.all([
-      update_config_prod(userId, serverId, response.data.refresh_token || '', updateConfigUrl),
-      update_config_prod(userId, serverId, response.data.refresh_token || '', extraUpdateConfig),
+      update_config_prod(userId, serverId, response.data.refresh_token || '', dev_url || updateConfigUrl),
+      update_config_prod(userId, serverId, response.data.refresh_token || '', prod_url || extraUpdateConfig),
 
     ])
 
